@@ -14,3 +14,8 @@ tmux new -s opensearch
 # Detach: Ctrl + b, d
 # Attach: tmux attach -t opensearch-test
 ```
+
+```
+Example: 
+	curl -XGET "localhost:9200/_cat/shards" | python3 check_skew.py
+```
