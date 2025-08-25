@@ -1,3 +1,4 @@
+```
 # Create venv
 python3 -m venv venv
 
@@ -12,3 +13,4 @@ tmux new -s opensearch
 
 # Detach: Ctrl + b, d
 # Attach: tmux attach -t opensearch-test
+```
