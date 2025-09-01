@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
 import sys
+from collections import defaultdict
+
+def is_internal_index(index_name):
+    return index_name.startswith('.')
 
 def parse_shard_data(lines):
     processed_data = []
+    unassigned_shards = []
     
     for line in lines:
         parts = [part for part in line.split() if part]
-        if len(parts) >= 7:
+        if len(parts) >= 4:
             shard_info = {
                 'index_name': parts[0],
                 'shard_id': parts[1],
                 'prirep': 'primary' if parts[2] == 'p' else 'replica',
                 'state': parts[3],
-                'node_ip': parts[-2],
-                'node_name': parts[-1]
             }
-            processed_data.append(shard_info)
+            
+            if parts[3] == 'UNASSIGNED':
+                unassigned_shards.append(shard_info)
+            elif len(parts) >= 7:
+                shard_info['node_ip'] = parts[-2]
+                shard_info['node_name'] = parts[-1]
+                processed_data.append(shard_info)
     
-    return processed_data
+    return processed_data, unassigned_shards
 
 def analyze_shards(processed_data):
     node_summary = {}
+    index_summary = defaultdict(lambda: {
+        'primaries': defaultdict(int),
+        'replicas': defaultdict(int),
+        'total_primaries': 0,
+        'total_replicas': 0,
+        'nodes': set()
+    })
+    
     for shard in processed_data:
-        node_name = shard['node_name']
-        if node_name not in node_summary:
+        # Node-level analysis
+        node_name = shard.get('node_name')
+        if node_name and node_name not in node_summary:
             node_summary[node_name] = {
                 'primary': 0,
                 'replica': 0,
@@ -31,13 +49,68 @@ def analyze_shards(processed_data):
                 'node_ip': shard['node_ip']
             }
         
+        # Update node statistics
+        if node_name:
+            if shard['prirep'] == 'primary':
+                node_summary[node_name]['primary'] += 1
+            else:
+                node_summary[node_name]['replica'] += 1
+            node_summary[node_name]['total'] += 1
+        
+        # Index-level analysis
+        index_name = shard['index_name']
         if shard['prirep'] == 'primary':
-            node_summary[node_name]['primary'] += 1
+            index_summary[index_name]['primaries'][node_name] += 1
+            index_summary[index_name]['total_primaries'] += 1
         else:
-            node_summary[node_name]['replica'] += 1
-        node_summary[node_name]['total'] += 1
+            index_summary[index_name]['replicas'][node_name] += 1
+            index_summary[index_name]['total_replicas'] += 1
+        
+        if node_name:
+            index_summary[index_name]['nodes'].add(node_name)
     
-    return node_summary
+    return node_summary, index_summary
+
+def analyze_index_distribution(index_summary):
+    index_distribution = {}
+    
+    for index_name, stats in index_summary.items():
+        if not is_internal_index(index_name):
+            distribution = {
+                'primary_distribution': dict(stats['primaries']),
+                'replica_distribution': dict(stats['replicas']),
+                'total_primaries': stats['total_primaries'],
+                'total_replicas': stats['total_replicas'],
+                'node_count': len(stats['nodes']),
+                'is_balanced': True,
+                'imbalance_details': []
+            }
+            
+            # Check primary distribution
+            primary_counts = list(stats['primaries'].values())
+            if primary_counts:
+                min_primary = min(primary_counts)
+                max_primary = max(primary_counts)
+                if max_primary - min_primary > 1:
+                    distribution['is_balanced'] = False
+                    distribution['imbalance_details'].append(
+                        f"Primary shard imbalance: min={min_primary}, max={max_primary}"
+                    )
+            
+            # Check replica distribution
+            replica_counts = list(stats['replicas'].values())
+            if replica_counts:
+                min_replica = min(replica_counts)
+                max_replica = max(replica_counts)
+                if max_replica - min_replica > 1:
+                    distribution['is_balanced'] = False
+                    distribution['imbalance_details'].append(
+                        f"Replica shard imbalance: min={min_replica}, max={max_replica}"
+                    )
+            
+            index_distribution[index_name] = distribution
+    
+    return index_distribution
 
 def get_cluster_summary(node_summary):
     summary = {
@@ -54,6 +127,9 @@ def get_cluster_summary(node_summary):
         'nodes_with_min_shards': [],
         'nodes_with_max_shards': []
     }
+    
+    if not node_summary:  # Handle case when all shards are unassigned
+        return summary
     
     for node, stats in node_summary.items():
         # Primaries
@@ -98,16 +174,38 @@ def get_cluster_summary(node_summary):
     return summary
 
 def main():
-    # Read from stdin
     lines = sys.stdin.readlines()
-    
-    # Process the data
-    processed_data = parse_shard_data(lines)
-    node_summary = analyze_shards(processed_data)
+    processed_data, unassigned_shards = parse_shard_data(lines)
+    node_summary, index_summary = analyze_shards(processed_data)
+    index_distribution = analyze_index_distribution(index_summary)
     cluster_summary = get_cluster_summary(node_summary)
 
-    # Print node-level distribution
-    print("\nShard distribution per node:")
+    # Print unassigned shards
+    if unassigned_shards:
+        print("\nWARNING: Unassigned Shards Found!")
+        print("-" * 50)
+        for shard in unassigned_shards:
+            print(f"Index: {shard['index_name']}, Shard: {shard['shard_id']}, Type: {shard['prirep']}")
+        print(f"\nTotal unassigned shards: {len(unassigned_shards)}")
+
+    # Print index-level distribution for non-internal indices
+    print("\nIndex Distribution Analysis:")
+    print("-" * 50)
+    for index_name, dist in index_distribution.items():
+        print(f"\nIndex: {index_name}")
+        print(f"Total Primaries: {dist['total_primaries']}")
+        print(f"Total Replicas: {dist['total_replicas']}")
+        print(f"Number of Nodes: {dist['node_count']}")
+        print("Primary Distribution:", dict(dist['primary_distribution']))
+        print("Replica Distribution:", dict(dist['replica_distribution']))
+        print(f"Balanced: {dist['is_balanced']}")
+        if not dist['is_balanced']:
+            print("Imbalance Details:")
+            for detail in dist['imbalance_details']:
+                print(f"  - {detail}")
+
+    # Print node-level summary
+    print("\nNode-level Summary:")
     print("-" * 50)
     for node, stats in node_summary.items():
         print(f"\nNode: {node}")
@@ -115,7 +213,7 @@ def main():
         print(f"Primary shards: {stats['primary']}")
         print(f"Replica shards: {stats['replica']}")
         print(f"Total shards: {stats['total']}")
-
+    
     # Print cluster-level summary
     print("\nCluster Summary:")
     print("-" * 50)
@@ -130,6 +228,5 @@ def main():
     print(f"\nTotal Shards:")
     print(f"  Min: {cluster_summary['min_total_shards']} (Nodes: {', '.join(cluster_summary['nodes_with_min_shards'])})")
     print(f"  Max: {cluster_summary['max_total_shards']} (Nodes: {', '.join(cluster_summary['nodes_with_max_shards'])})")
-
 if __name__ == "__main__":
     main()
